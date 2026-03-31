@@ -12,6 +12,9 @@ Keys:
   b     — set baud rate
   p     — set PID params (M1 and M2)
   q     — quit
+  i     — invert motor/encoder direction
+  v     — spin test (velocity mode)
+  m     — move test (position mode)
   d     — toggle debug overlay
 """
 
@@ -47,6 +50,13 @@ CMD_READ_M1_VELPID      = 55
 CMD_READ_M2_VELPID      = 56
 CMD_READ_TEMP           = 82
 CMD_READ_STATUS         = 90
+CMD_READ_ENC_MODE       = 91
+CMD_SET_M1_ENC_MODE     = 92
+CMD_SET_M2_ENC_MODE     = 93
+CMD_DRIVE_M1_SPEED      = 35
+CMD_DRIVE_M2_SPEED      = 36
+CMD_DRIVE_M1_POS        = 119
+CMD_DRIVE_M2_POS        = 120
 CMD_WRITE_NVM           = 94
 CMD_SET_BAUD            = 169
 
@@ -387,6 +397,119 @@ def action_set_pid(stdscr, ser, addr, state):
             "OK" if r1 else "FAIL", "OK" if r2 else "FAIL"))
 
 
+
+
+def action_invert(stdscr, ser, addr, state):
+    """Read encoder modes and toggle motor/encoder direction bits."""
+    d = send_recv(ser, addr, CMD_READ_ENC_MODE, recv_n=2)
+    if not d:
+        state.log_msg("ERROR: could not read encoder modes")
+        return
+
+    m1_mode = d[0]
+    m2_mode = d[1]
+
+    # Bit 6 = encoder reversed, bit 5 = motor reversed
+    def desc(mode):
+        parts = []
+        if mode & 0x40: parts.append("ENC-inv")
+        if mode & 0x20: parts.append("MOT-inv")
+        return ("  ".join(parts)) if parts else "normal"
+
+    opts = [
+        "M1 motor  (now: %s)" % ("INVERTED" if m1_mode & 0x20 else "normal"),
+        "M1 encoder (now: %s)" % ("INVERTED" if m1_mode & 0x40 else "normal"),
+        "M2 motor  (now: %s)" % ("INVERTED" if m2_mode & 0x20 else "normal"),
+        "M2 encoder (now: %s)" % ("INVERTED" if m2_mode & 0x40 else "normal"),
+    ]
+
+    idx = curses_menu(stdscr, "TOGGLE INVERT", opts)
+    if idx < 0:
+        state.log_msg("Invert cancelled")
+        return
+
+    if idx == 0:   m1_mode ^= 0x20
+    elif idx == 1: m1_mode ^= 0x40
+    elif idx == 2: m2_mode ^= 0x20
+    elif idx == 3: m2_mode ^= 0x40
+
+    r1 = send_recv(ser, addr, CMD_SET_M1_ENC_MODE, payload=bytes([m1_mode]))
+    r2 = send_recv(ser, addr, CMD_SET_M2_ENC_MODE, payload=bytes([m2_mode]))
+
+    if r1 and r2:
+        state.log_msg("Invert set — M1=0x%02x M2=0x%02x — saving..." % (m1_mode, m2_mode))
+        save_nvm(ser, addr)
+        state.log_msg("Saved. M1:%s  M2:%s" % (desc(m1_mode), desc(m2_mode)))
+    else:
+        state.log_msg("ERROR: set enc mode failed")
+
+
+def action_spin_test(stdscr, ser, addr, state):
+    """Spin motors at configurable speed for configurable duration."""
+    s = curses_input(stdscr, "Spin speed pps [100]: ")
+    try: speed = int(s) if s else 100
+    except ValueError: speed = 100
+
+    s = curses_input(stdscr, "Duration secs [2]: ")
+    try: dur = float(s) if s else 2.0
+    except ValueError: dur = 2.0
+
+    idx = curses_menu(stdscr, "WHICH MOTORS", ["M1 only", "M2 only", "Both"])
+    if idx < 0:
+        state.log_msg("Spin test cancelled")
+        return
+
+    state.log_msg("Spinning at %d pps for %.1fs..." % (speed, dur))
+
+    if idx == 0:
+        send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", speed))
+    elif idx == 1:
+        send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", speed))
+    else:
+        send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", speed, speed))
+
+    time.sleep(dur)
+
+    send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
+    state.log_msg("Spin test done — motors stopped")
+
+
+def action_move_test(stdscr, ser, addr, state):
+    """Move motors by configurable encoder count."""
+    s = curses_input(stdscr, "Counts to move [100]: ")
+    try: counts = int(s) if s else 100
+    except ValueError: counts = 100
+
+    s = curses_input(stdscr, "Speed pps [200]: ")
+    try: speed = int(s) if s else 200
+    except ValueError: speed = 200
+
+    idx = curses_menu(stdscr, "WHICH MOTORS", ["M1 only", "M2 only", "Both"])
+    if idx < 0:
+        state.log_msg("Move test cancelled")
+        return
+
+    with state.lock:
+        enc1 = state.m1_enc
+        enc2 = state.m2_enc
+
+    target1 = enc1 + counts
+    target2 = enc2 + counts
+
+    state.log_msg("Moving %+d counts at %d pps..." % (counts, speed))
+
+    # cmd 119/120: [addr, cmd, speed(4), accel(4), deccel(4), position(4), buffer(1)]
+    accel = speed * 4   # ramp up in ~0.25s
+    if idx in (0, 2):
+        payload = struct.pack(">IIIiB", speed, accel, accel, target1, 1)
+        send_recv(ser, addr, CMD_DRIVE_M1_POS, payload=payload)
+    if idx in (1, 2):
+        payload = struct.pack(">IIIiB", speed, accel, accel, target2, 1)
+        send_recv(ser, addr, CMD_DRIVE_M2_POS, payload=payload)
+
+    state.log_msg("Move command sent — target M1:%d M2:%d" % (target1, target2))
+
+
 # ── Draw ──────────────────────────────────────────────────────────────────────
 
 def draw(stdscr, state, show_debug, cur_baud):
@@ -421,6 +544,9 @@ def draw(stdscr, state, show_debug, cur_baud):
         elif key == ord('b'): return 'baud',   cur_baud
         elif key == ord('p'): return 'pid',    cur_baud
         elif key == ord('d'): return 'debug',  cur_baud
+        elif key == ord('v'): return 'vel',    cur_baud
+        elif key == ord('m'): return 'move',   cur_baud
+        elif key == ord('i'): return 'invert', cur_baud
 
         now = time.time()
         if now - last_draw < 0.08:
@@ -507,17 +633,16 @@ def draw(stdscr, state, show_debug, cur_baud):
 
         # ── Right: CONTROLS ───────────────────────────────────────────────────
         box_title(stdscr, row, right_x, right_w, "CONTROLS", C_BORDER, C_HEAD)
-        for key_ch, label in [("s","STOP MOTORS"),("r","RESET ENCODERS"),
-                               ("b","SET BAUD"),  ("p","SET PID"),
-                               ("d","DEBUG"),     ("q","QUIT")]:
-            i = [("s","STOP MOTORS"),("r","RESET ENCODERS"),
-                 ("b","SET BAUD"),  ("p","SET PID"),
-                 ("d","DEBUG"),     ("q","QUIT")].index((key_ch, label))
+        ctrl_items = [("s","STOP"),("r","RESET ENC"),("v","SPIN TEST"),
+                      ("m","MOVE TEST"),("i","INVERT M/ENC"),("b","SET BAUD"),
+                      ("p","SET PID"),("d","DEBUG"),("q","QUIT")]
+        for key_ch, label in ctrl_items:
+            i = ctrl_items.index((key_ch, label))
             box_side(stdscr, row+1+i, right_x, right_w, C_BORDER)
             safe_add(stdscr, row+1+i, right_x+2, "[", C_DIM)
             safe_add(stdscr, row+1+i, right_x+3, key_ch, C_ACCENT | curses.A_BOLD)
             safe_add(stdscr, row+1+i, right_x+4, "] " + label, C_NORMAL)
-        box_bottom(stdscr, row+7, right_x, right_w, C_BORDER)
+        box_bottom(stdscr, row+10, right_x, right_w, C_BORDER)
 
         # ── Right: FIRMWARE ───────────────────────────────────────────────────
         fw_r = row + 9
@@ -609,6 +734,30 @@ def tui_main(stdscr, ser, addr, state, init_baud):
                 poll_thread.join(timeout=1.0)
                 stop_event.clear()
                 action_set_pid(stdscr, ser, addr, state)
+                poll_thread = threading.Thread(
+                    target=poller, args=(ser, addr, state, stop_event), daemon=True)
+                poll_thread.start()
+            elif action == 'invert':
+                stop_event.set()
+                poll_thread.join(timeout=1.0)
+                stop_event.clear()
+                action_invert(stdscr, ser, addr, state)
+                poll_thread = threading.Thread(
+                    target=poller, args=(ser, addr, state, stop_event), daemon=True)
+                poll_thread.start()
+            elif action == 'vel':
+                stop_event.set()
+                poll_thread.join(timeout=1.0)
+                stop_event.clear()
+                action_spin_test(stdscr, ser, addr, state)
+                poll_thread = threading.Thread(
+                    target=poller, args=(ser, addr, state, stop_event), daemon=True)
+                poll_thread.start()
+            elif action == 'move':
+                stop_event.set()
+                poll_thread.join(timeout=1.0)
+                stop_event.clear()
+                action_move_test(stdscr, ser, addr, state)
                 poll_thread = threading.Thread(
                     target=poller, args=(ser, addr, state, stop_event), daemon=True)
                 poll_thread.start()
