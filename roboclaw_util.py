@@ -20,6 +20,9 @@ Commands:
   set_config HEX             write raw config value e.g. 0x00e3
   set_baud RATE              set baud rate (2400/9600/19200/38400/57600/115200/230400/460800)
   estop_config               configure S3/S4/S5 as e-stop inputs and save
+  read_pins                  read S3/S4/S5/CTRL1/CTRL2 pin modes
+  set_pins S3 S4 S5 C1 C2    set pin modes (hex values, e.g. 0x00 0x41 0x00 0x00 0x00)
+  estop_pin [PIN] [--latch]  configure pin as e-stop (default S4, non-latching)
   reload                     reload settings from NVM (cmd 95, no reset)
   reset                      write NVM with unlock key — unit resets
   save                       alias for reset (WriteNVM)
@@ -57,6 +60,8 @@ ADDRESS = 0x80
 TIMEOUT = 0.15
 DEBUG   = False
 
+CMD_SET_PIN_FUNCTIONS   = 74
+CMD_READ_PIN_FUNCTIONS  = 75
 CMD_READ_ENC1           = 16
 CMD_READ_ENC2           = 17
 CMD_READ_SPEED1         = 18
@@ -91,6 +96,33 @@ CONFIG_ESTOP_LATCH   = 0b010
 CONFIG_ESTOP_NOLATCH = 0b011
 PIN_MODE_SHIFT       = 2
 
+
+# Pin mode values for cmd 74 (S3/S4/S5/CTRL1/CTRL2)
+PIN_MODE_NAMES = {
+    0x00: "Default/Disabled",
+    0x41: "E-Stop",
+    0xC1: "E-Stop (Latching)",
+    0x14: "Voltage Clamp",
+    0x80: "Encoder Toggle",
+    0x04: "Brake",
+    0x11: "Stop M1",
+    0x21: "Stop M2",
+    0x84: "User Output",
+    0x40: "Flip Switch",
+}
+
+PIN_MODE_OPTIONS = [
+    (0x00, "Default/Disabled"),
+    (0x41, "E-Stop (non-latching)"),
+    (0xC1, "E-Stop (latching)"),
+    (0x14, "Voltage Clamp"),
+    (0x04, "Brake"),
+    (0x11, "Stop M1"),
+    (0x21, "Stop M2"),
+    (0x80, "Encoder Toggle"),
+    (0x84, "User Output"),
+    (0x40, "Flip Switch"),
+]
 STATUS_NAMES = {
     0: "Normal", 1: "M1 OverCurrent", 2: "M2 OverCurrent",
     3: "E-Stop", 4: "Temp Error", 5: "Temp2 Error",
@@ -362,6 +394,79 @@ def cmd_estop_config(ser, addr, latching=True):
     else:
         print("  ERROR: set config failed")
 
+
+def cmd_read_pins(ser, addr):
+    print("=== Pin Functions (S3/S4/S5/CTRL1/CTRL2) ===")
+    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=5)
+    if not d:
+        print("  (no response)")
+        return None
+    names = ["S3", "S4", "S5", "CTRL1", "CTRL2"]
+    modes = list(d)
+    for name, mode in zip(names, modes):
+        label = PIN_MODE_NAMES.get(mode, "0x%02x" % mode)
+        print("  %s : 0x%02x  %s" % (name, mode, label))
+    return modes
+
+def cmd_set_pins(ser, addr, pin_args):
+    """
+    Set pin functions. pin_args is a list of up to 5 hex values for S3,S4,S5,CTRL1,CTRL2.
+    Missing values default to current settings.
+    """
+    print("=== Set Pin Functions ===")
+    # Read current first
+    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=5)
+    if not d:
+        print("  ERROR: could not read current pin modes")
+        return
+    modes = list(d)
+    names = ["S3", "S4", "S5", "CTRL1", "CTRL2"]
+
+    for i, val in enumerate(pin_args[:5]):
+        try:
+            modes[i] = int(val, 0)
+        except ValueError:
+            print("  ERROR: invalid value %s" % val)
+            return
+
+    for name, mode in zip(names, modes):
+        label = PIN_MODE_NAMES.get(mode, "0x%02x" % mode)
+        print("  %s -> 0x%02x  %s" % (name, mode, label))
+
+    payload = bytes(modes)
+    r = send_recv(ser, addr, CMD_SET_PIN_FUNCTIONS, payload=payload)
+    if r:
+        print("  Written. Saving...")
+        do_write_nvm(ser, addr)
+    else:
+        print("  ERROR: set pin functions failed")
+
+def cmd_estop_pin(ser, addr, pin="S4", latching=False):
+    """Quick helper: configure a single pin as e-stop."""
+    print("=== Configure %s as E-Stop ===" % pin)
+    pin_map = {"S3": 0, "S4": 1, "S5": 2, "CTRL1": 3, "CTRL2": 4}
+    if pin.upper() not in pin_map:
+        print("  ERROR: unknown pin %s (use S3/S4/S5/CTRL1/CTRL2)" % pin)
+        return
+    idx = pin_map[pin.upper()]
+    mode = 0xC1 if latching else 0x41
+
+    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=5)
+    if not d:
+        print("  ERROR: could not read current modes")
+        return
+    modes = list(d)
+    modes[idx] = mode
+    label = "latching" if latching else "non-latching"
+    print("  Setting %s to E-Stop (%s) = 0x%02x" % (pin.upper(), label, mode))
+    payload = bytes(modes)
+    r = send_recv(ser, addr, CMD_SET_PIN_FUNCTIONS, payload=payload)
+    if r:
+        print("  Written. Saving...")
+        do_write_nvm(ser, addr)
+    else:
+        print("  ERROR: set pin functions failed")
+
 def cmd_reload(ser, addr):
     print("=== Reload NVM (cmd 95) ===")
     r = send_recv(ser, addr, CMD_RELOAD_NVM)
@@ -432,6 +537,14 @@ def main():
     elif cmd == "stop":         cmd_stop(ser, addr)
     elif cmd == "read_config":  cmd_read_config(ser, addr)
     elif cmd == "estop_config": cmd_estop_config(ser, addr, latching=not args.no_latch)
+    elif cmd == "read_pins":    cmd_read_pins(ser, addr)
+    elif cmd == "set_pins":
+        if not args.args:
+            print("Usage: set_pins S3hex S4hex S5hex CTRL1hex CTRL2hex"); sys.exit(1)
+        cmd_set_pins(ser, addr, args.args)
+    elif cmd == "estop_pin":
+        pin = args.args[0].upper() if args.args else "S4"
+        cmd_estop_pin(ser, addr, pin=pin, latching=args.no_latch == False and "--latch" in sys.argv)
     elif cmd == "reload":       cmd_reload(ser, addr)
     elif cmd in ("reset", "save"): cmd_reset(ser, addr)
     elif cmd == "set_config":
