@@ -499,7 +499,7 @@ def action_spin_test(stdscr, ser, addr, state):
         state.log_msg("Spin test cancelled")
         return
 
-    state.log_msg("Spinning at %d pps for %.1fs..." % (speed, dur))
+    state.log_msg("Spinning at %d pps — press [s] to stop" % speed)
 
     if idx == 0:
         send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", speed))
@@ -507,22 +507,7 @@ def action_spin_test(stdscr, ser, addr, state):
         send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", speed))
     else:
         send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", speed, speed))
-
-    time.sleep(dur)
-
-    # Stop whichever motors we started
-    if idx == 0:
-        send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", 0))
-        send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
-    elif idx == 1:
-        send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", 0))
-        send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
-    else:
-        send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
-    # Belt and suspenders — duty=0 on both
-    send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
-    send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
-    state.log_msg("Spin test done — motors stopped")
+    # Return immediately — s key stops, e key e-stops
 
 
 def action_move_test(stdscr, ser, addr, state):
