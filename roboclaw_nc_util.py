@@ -806,21 +806,17 @@ def tui_main(stdscr, ser, addr, state, init_baud):
                     state.estop_active = True
                 state.log_msg("E-STOP ASSERTED (GPIO%d low)" % ESTOP_GPIO)
             elif action == 'estop_off':
-                # 1) zero motors
-                send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
-                send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
-                send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
-                time.sleep(0.05)
-                # 2) release GPIO
+                # 1) release GPIO — RoboClaw can't receive serial while e-stopped
                 estop_deassert()
-                time.sleep(0.05)
-                # 3) stop again to clear any latched e-stop state in RoboClaw
+                time.sleep(0.2)   # wait for RoboClaw to come back online
+                ser.reset_input_buffer()
+                # 2) now send stop so it doesn't resume at last commanded speed
                 send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
                 send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
                 send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
                 with state.lock:
                     state.estop_active = False
-                state.log_msg("E-stop cleared — ready")
+                state.log_msg("E-stop cleared — motors zeroed")
             elif action == 'invert':
                 stop_event.set()
                 poll_thread.join(timeout=1.0)
