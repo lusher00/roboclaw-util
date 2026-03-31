@@ -12,6 +12,8 @@ Keys:
   b     — set baud rate
   p     — set PID params (M1 and M2)
   q     — quit
+  e     — assert e-stop (GPIO57 low)
+  E     — clear e-stop (zeros motors first, then releases)
   i     — invert motor/encoder direction
   v     — spin test (velocity mode)
   m     — move test (position mode)
@@ -26,6 +28,43 @@ import sys
 import argparse
 import threading
 import collections
+
+
+# ── GPIO E-Stop (sysfs) ───────────────────────────────────────────────────────
+# GPIO1_25 = (1*32)+25 = 57
+ESTOP_GPIO    = 57
+ESTOP_GPIO_PATH = "/sys/class/gpio/gpio%d" % ESTOP_GPIO
+
+def gpio_export():
+    try:
+        if not __import__('os').path.exists(ESTOP_GPIO_PATH):
+            with open("/sys/class/gpio/export", "w") as f:
+                f.write(str(ESTOP_GPIO))
+        with open("%s/direction" % ESTOP_GPIO_PATH, "w") as f:
+            f.write("out")
+    except Exception as e:
+        pass
+
+def gpio_write(val):
+    try:
+        with open("%s/value" % ESTOP_GPIO_PATH, "w") as f:
+            f.write("1" if val else "0")
+        return True
+    except Exception:
+        return False
+
+def gpio_read():
+    try:
+        with open("%s/value" % ESTOP_GPIO_PATH) as f:
+            return int(f.read().strip())
+    except Exception:
+        return -1
+
+def estop_assert():
+    gpio_write(0)
+
+def estop_deassert():
+    gpio_write(1)
 
 TIMEOUT = 0.15
 POLL_HZ = 10
@@ -138,6 +177,7 @@ class State:
         self.m1_qpps     = 0
         self.m2_kp = self.m2_ki = self.m2_kd = 0.0
         self.m2_qpps     = 0
+        self.estop_active = False
         self.poll_count  = 0
         self.errors      = 0
         self.log         = collections.deque(maxlen=6)
@@ -470,7 +510,18 @@ def action_spin_test(stdscr, ser, addr, state):
 
     time.sleep(dur)
 
-    send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
+    # Stop whichever motors we started
+    if idx == 0:
+        send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", 0))
+        send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
+    elif idx == 1:
+        send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", 0))
+        send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
+    else:
+        send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
+    # Belt and suspenders — duty=0 on both
+    send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
+    send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
     state.log_msg("Spin test done — motors stopped")
 
 
@@ -547,6 +598,8 @@ def draw(stdscr, state, show_debug, cur_baud):
         elif key == ord('v'): return 'vel',    cur_baud
         elif key == ord('m'): return 'move',   cur_baud
         elif key == ord('i'): return 'invert', cur_baud
+        elif key == ord('e'): return 'estop_on',  cur_baud
+        elif key == ord('E'): return 'estop_off', cur_baud
 
         now = time.time()
         if now - last_draw < 0.08:
@@ -618,9 +671,14 @@ def draw(stdscr, state, show_debug, cur_baud):
         box_title(stdscr, fr, 0, left_w, "STATUS", C_BORDER, C_HEAD)
         flags  = s["status_flags"]
         active = [(b, n) for b, n in STATUS_NAMES.items() if flags & (1 << b)]
-        if not active:
+        estop_on = s.get("estop_active", False)
+        if not active and not estop_on:
             box_side(stdscr, fr+1, 0, left_w, C_BORDER)
             safe_add(stdscr, fr+1, 2, "ALL CLEAR", C_OK | curses.A_BOLD)
+            for i in range(2, 5): box_side(stdscr, fr+i, 0, left_w, C_BORDER)
+        elif estop_on and not active:
+            box_side(stdscr, fr+1, 0, left_w, C_BORDER)
+            safe_add(stdscr, fr+1, 2, "E-STOP ACTIVE", C_ERR | curses.A_BOLD)
             for i in range(2, 5): box_side(stdscr, fr+i, 0, left_w, C_BORDER)
         else:
             for i in range(4):
@@ -633,16 +691,17 @@ def draw(stdscr, state, show_debug, cur_baud):
 
         # ── Right: CONTROLS ───────────────────────────────────────────────────
         box_title(stdscr, row, right_x, right_w, "CONTROLS", C_BORDER, C_HEAD)
-        ctrl_items = [("s","STOP"),("r","RESET ENC"),("v","SPIN TEST"),
-                      ("m","MOVE TEST"),("i","INVERT M/ENC"),("b","SET BAUD"),
-                      ("p","SET PID"),("d","DEBUG"),("q","QUIT")]
+        ctrl_items = [("s","STOP"),("r","RESET ENC"),("e","E-STOP"),
+                      ("E","CLEAR ESTOP"),("v","SPIN TEST"),("m","MOVE TEST"),
+                      ("i","INVERT M/ENC"),("b","SET BAUD"),("p","SET PID"),
+                      ("d","DEBUG"),("q","QUIT")]
         for key_ch, label in ctrl_items:
             i = ctrl_items.index((key_ch, label))
             box_side(stdscr, row+1+i, right_x, right_w, C_BORDER)
             safe_add(stdscr, row+1+i, right_x+2, "[", C_DIM)
             safe_add(stdscr, row+1+i, right_x+3, key_ch, C_ACCENT | curses.A_BOLD)
             safe_add(stdscr, row+1+i, right_x+4, "] " + label, C_NORMAL)
-        box_bottom(stdscr, row+10, right_x, right_w, C_BORDER)
+        box_bottom(stdscr, row+12, right_x, right_w, C_BORDER)
 
         # ── Right: FIRMWARE ───────────────────────────────────────────────────
         fw_r = row + 9
@@ -704,6 +763,10 @@ def tui_main(stdscr, ser, addr, state, init_baud):
     stop_event = threading.Event()
     cur_baud   = [init_baud]
 
+    gpio_export()
+    estop_deassert()   # start armed
+    state.log_msg("GPIO%d exported — e-stop armed" % ESTOP_GPIO)
+
     poll_thread = threading.Thread(
         target=poller, args=(ser, addr, state, stop_event), daemon=True)
     poll_thread.start()
@@ -737,6 +800,21 @@ def tui_main(stdscr, ser, addr, state, init_baud):
                 poll_thread = threading.Thread(
                     target=poller, args=(ser, addr, state, stop_event), daemon=True)
                 poll_thread.start()
+            elif action == 'estop_on':
+                estop_assert()
+                with state.lock:
+                    state.estop_active = True
+                state.log_msg("E-STOP ASSERTED (GPIO%d low)" % ESTOP_GPIO)
+            elif action == 'estop_off':
+                # Zero motors first, then release
+                send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
+                send_recv(ser, addr, CMD_DRIVE_M1_SIGNED, payload=struct.pack(">h", 0))
+                send_recv(ser, addr, CMD_DRIVE_M2_SIGNED, payload=struct.pack(">h", 0))
+                time.sleep(0.1)
+                estop_deassert()
+                with state.lock:
+                    state.estop_active = False
+                state.log_msg("E-stop cleared — motors zeroed before release")
             elif action == 'invert':
                 stop_event.set()
                 poll_thread.join(timeout=1.0)
@@ -764,6 +842,7 @@ def tui_main(stdscr, ser, addr, state, init_baud):
             elif action == 'debug':
                 show_debug[0] = not show_debug[0]
     finally:
+        estop_assert()   # safe on exit
         stop_event.set()
         poll_thread.join(timeout=1.0)
 
