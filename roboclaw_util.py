@@ -399,7 +399,7 @@ def cmd_estop_config(ser, addr, latching=True):
 
 def cmd_read_pins(ser, addr):
     print("=== Pin Functions (S3/S4/S5/CTRL1/CTRL2) ===")
-    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=5)
+    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=3)
     if not d:
         print("  (no response)")
         return None
@@ -417,7 +417,7 @@ def cmd_set_pins(ser, addr, pin_args):
     """
     print("=== Set Pin Functions ===")
     # Read current first
-    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=5)
+    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=3)
     if not d:
         print("  ERROR: could not read current pin modes")
         return
@@ -453,7 +453,7 @@ def cmd_estop_pin(ser, addr, pin="S4", latching=False):
     idx = pin_map[pin.upper()]
     mode = 0xC1 if latching else 0x41
 
-    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=5)
+    d = send_recv(ser, addr, CMD_READ_PIN_FUNCTIONS, recv_n=3)
     if not d:
         print("  ERROR: could not read current modes")
         return
