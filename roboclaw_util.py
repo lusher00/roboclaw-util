@@ -18,7 +18,8 @@ Commands:
   stop                       zero both motors
   read_config                dump and decode config register
   set_config HEX             write raw config value e.g. 0x00e3
-  set_baud RATE              set baud rate (2400/9600/19200/38400/57600/115200/230400/460800)
+  set_timeout MS             set serial timeout in ms (0=disabled, recommend 500)
+  read_timeout               read current serial timeout
   estop_config               configure S3/S4/S5 as e-stop inputs and save
   read_pins                  read S3/S4/S5/CTRL1/CTRL2 pin modes
   set_pins S3 S4 S5 C1 C2    set pin modes (hex values, e.g. 0x00 0x41 0x00 0x00 0x00)
@@ -80,6 +81,7 @@ CMD_READ_M1_VELPID      = 55
 CMD_READ_M2_VELPID      = 56
 CMD_READ_TEMP           = 82
 CMD_READ_STATUS         = 90
+CMD_SET_SERIAL_TIMEOUT  = 14   # payload: 1 byte, units of 100ms (0=disabled)
 CMD_RELOAD_NVM          = 95   # reload from NVM, no reset
 CMD_SET_CONFIG          = 98
 CMD_GET_CONFIG          = 99
@@ -467,6 +469,28 @@ def cmd_estop_pin(ser, addr, pin="S4", latching=False):
     else:
         print("  ERROR: set pin functions failed")
 
+def cmd_set_timeout(ser, addr, ms):
+    """Set serial timeout. 0 = disabled. Value is in ms, stored as units of 100ms."""
+    val = int(round(ms / 100))
+    if val < 0 or val > 255:
+        print("  ERROR: timeout must be 0-25500 ms")
+        return
+    r = send_recv(ser, addr, CMD_SET_SERIAL_TIMEOUT, payload=bytes([val]))
+    if r is not None:
+        print("  Serial timeout set to %d ms (%d x 100ms)" % (val * 100, val))
+    else:
+        print("  ERROR: set timeout failed")
+
+def cmd_read_timeout(ser, addr):
+    """Read current serial timeout setting."""
+    d = send_recv(ser, addr, CMD_SET_SERIAL_TIMEOUT, recv_n=1)
+    if d:
+        val = d[0]
+        print("  Serial timeout: %d ms (%d x 100ms)%s" % (
+            val * 100, val, " (disabled)" if val == 0 else ""))
+    else:
+        print("  ERROR: read timeout failed")
+
 def cmd_reload(ser, addr):
     print("=== Reload NVM (cmd 95) ===")
     r = send_recv(ser, addr, CMD_RELOAD_NVM)
@@ -551,6 +575,12 @@ def main():
         if not args.args:
             print("Usage: set_config 0xHEX"); sys.exit(1)
         cmd_set_config_raw(ser, addr, int(args.args[0], 0))
+    elif cmd == "set_timeout":
+        if not args.args:
+            print("Usage: set_timeout MS"); sys.exit(1)
+        cmd_set_timeout(ser, addr, int(args.args[0]))
+    elif cmd == "read_timeout":
+        cmd_read_timeout(ser, addr)
     elif cmd == "set_baud":
         if not args.args:
             print("Usage: set_baud RATE"); sys.exit(1)
