@@ -499,7 +499,7 @@ def action_spin_test(stdscr, ser, addr, state):
         state.log_msg("Spin test cancelled")
         return
 
-    state.log_msg("Spinning at %d pps — press [s] to stop" % speed)
+    state.log_msg("Spinning at %d pps for %.1fs..." % (speed, dur))
 
     if idx == 0:
         send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", speed))
@@ -507,7 +507,12 @@ def action_spin_test(stdscr, ser, addr, state):
         send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", speed))
     else:
         send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", speed, speed))
-    # Return immediately — s key stops, e key e-stops
+
+    time.sleep(dur)
+
+    # Stop after duration
+    send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
+    state.log_msg("Spin complete — motors stopped")
 
 
 def action_move_test(stdscr, ser, addr, state):
