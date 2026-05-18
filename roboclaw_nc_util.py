@@ -382,8 +382,15 @@ def action_set_baud(stdscr, ser, addr, state, cur_baud):
         return cur_baud
 
 def action_set_pid(stdscr, ser, addr, state):
+    # Conservative safe defaults — Kp tuned for QPPS=2500 (need ~13 for full output at max speed)
+    # Start with Ki=0, Kd=0 and tune Kp alone first
+    SAFE_KP   = 15.0
+    SAFE_KI   = 0.0
+    SAFE_KD   = 0.0
+    SAFE_QPPS = 2500
+
     # Get values for M1
-    state.log_msg("Setting PID — enter values (blank=keep current)")
+    state.log_msg("Setting PID — enter values (blank=keep current, 'd'=safe defaults)")
 
     with state.lock:
         m1kp = state.m1_kp; m1ki = state.m1_ki
@@ -391,27 +398,52 @@ def action_set_pid(stdscr, ser, addr, state):
         m2kp = state.m2_kp; m2ki = state.m2_ki
         m2kd = state.m2_kd; m2q  = state.m2_qpps
 
-    def get_float(prompt, current):
-        s = curses_input(stdscr, "%s [%.4f]: " % (prompt, current))
-        if s == "": return current
-        try: return float(s)
-        except ValueError: return current
+    # Clamp to safe defaults if stored values look unreasonable
+    for name, val, limit in [("M1 Kp", m1kp, 10.0), ("M1 Ki", m1ki, 5.0),
+                              ("M1 Kd", m1kd, 10.0), ("M2 Kp", m2kp, 10.0),
+                              ("M2 Ki", m2ki, 5.0),  ("M2 Kd", m2kd, 10.0)]:
+        if abs(val) > limit:
+            state.log_msg("WARNING: %s=%.2f looks unreasonable — using safe default" % (name, val))
+    if abs(m1kp) > 10.0 or abs(m1ki) > 5.0 or abs(m1kd) > 10.0:
+        m1kp, m1ki, m1kd = SAFE_KP, SAFE_KI, SAFE_KD
+    if abs(m2kp) > 10.0 or abs(m2ki) > 5.0 or abs(m2kd) > 10.0:
+        m2kp, m2ki, m2kd = SAFE_KP, SAFE_KI, SAFE_KD
 
-    def get_int(prompt, current):
-        s = curses_input(stdscr, "%s [%d]: " % (prompt, current))
+    def get_float(prompt, current, safe):
+        s = curses_input(stdscr, "%s [%.4f] (press 'd' for safe=%.2f): " % (prompt, current, safe))
+        if s is None or s.strip() == "":
+            return current
+        if s.strip().lower() == "d":
+            return safe
+        try:
+            return float(s)
+        except ValueError:
+            return current
+
+    def get_int(prompt, current, safe):
+        s = curses_input(stdscr, "%s [%d] (press 'd' for safe=%d): " % (prompt, current, safe))
+        if s is None or s.strip() == "":
+            return current
+        if s.strip().lower() == "d":
+            return safe
+        try:
+            return int(s)
+        except ValueError:
+            return current
         if s == "": return current
         try: return int(s)
         except ValueError: return current
 
-    m1kp = get_float("M1 Kp", m1kp)
-    m1ki = get_float("M1 Ki", m1ki)
-    m1kd = get_float("M1 Kd", m1kd)
-    m1q  = get_int  ("M1 QPPS", m1q)
 
-    m2kp = get_float("M2 Kp", m2kp)
-    m2ki = get_float("M2 Ki", m2ki)
-    m2kd = get_float("M2 Kd", m2kd)
-    m2q  = get_int  ("M2 QPPS", m2q)
+    m1kp = get_float("M1 Kp",   m1kp, SAFE_KP)
+    m1ki = get_float("M1 Ki",   m1ki, SAFE_KI)
+    m1kd = get_float("M1 Kd",   m1kd, SAFE_KD)
+    m1q  = get_int  ("M1 QPPS", m1q,  SAFE_QPPS)
+
+    m2kp = get_float("M2 Kp",   m2kp, SAFE_KP)
+    m2ki = get_float("M2 Ki",   m2ki, SAFE_KI)
+    m2kd = get_float("M2 Kd",   m2kd, SAFE_KD)
+    m2q  = get_int  ("M2 QPPS", m2q,  SAFE_QPPS)
 
     # Write M1 — packet order: Kd, Kp, Ki, QPPS
     payload = struct.pack(">IIII",
@@ -500,17 +532,22 @@ def action_spin_test(stdscr, ser, addr, state):
         return
 
     state.log_msg("Spinning at %d pps for %.1fs..." % (speed, dur))
+    ser.reset_input_buffer()
 
     if idx == 0:
-        send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", speed))
+        r = send_recv(ser, addr, CMD_DRIVE_M1_SPEED, payload=struct.pack(">i", speed))
     elif idx == 1:
-        send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", speed))
+        r = send_recv(ser, addr, CMD_DRIVE_M2_SPEED, payload=struct.pack(">i", speed))
     else:
-        send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", speed, speed))
+        r = send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", speed, speed))
+
+    if not r:
+        state.log_msg("WARNING: no ACK from RoboClaw for speed command")
 
     time.sleep(dur)
 
     # Stop after duration
+    ser.reset_input_buffer()
     send_recv(ser, addr, CMD_DRIVE_M1M2_SPEED, payload=struct.pack(">ii", 0, 0))
     state.log_msg("Spin complete — motors stopped")
 
@@ -732,7 +769,7 @@ def draw(stdscr, state, show_debug, cur_baud):
             safe_add(stdscr, mr+5, cx, "ENC", C_DIM)
             safe_add(stdscr, mr+5, cx+4, "%12d" % enc, C_NORMAL | curses.A_BOLD)
 
-            pid_str = "P%-5.2f I%-5.2f D%-5.2f  QPPS %d" % (kp, ki, kd, qpps)
+            pid_str = "P:%-6.2f I:%-6.2f D:%-6.2f QPPS:%-5d" % (kp, ki, kd, qpps)
             safe_add(stdscr, mr+6, cx, pid_str[:iw], C_DIM)
 
         # ── Log ───────────────────────────────────────────────────────────────
